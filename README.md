@@ -34,7 +34,7 @@ This version includes a Strava integration flow so the app can connect to a Stra
 4. Set the Strava authorization callback to `http://localhost:5173/api/strava/callback`.
 5. Run `npm run dev` and open the frontend.
 
-The backend keeps the Strava token in an in-memory server session tied to a cookie. That is fine for local development, but it is not durable storage for production.
+The backend keeps the Strava token in a local persisted session store at `.data/sessions.json` tied to a cookie, so Strava sessions survive server restarts during development. That is still not durable or secure enough for production and should be replaced with a proper server-side session store or encrypted credential storage.
 
 ## Development
 

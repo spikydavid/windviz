@@ -1,4 +1,11 @@
 import crypto from 'node:crypto'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
 import cors from 'cors'
@@ -13,10 +20,12 @@ const app = express()
 const port = Number(process.env.PORT || 3000)
 const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
 const sessionCookieName = 'windviz_session'
+const sessionTtlMs = 30 * 24 * 60 * 60 * 1000
 const stravaAuthorizeUrl = 'https://www.strava.com/oauth/authorize'
 const stravaTokenUrl = 'https://www.strava.com/oauth/token'
 const stravaApiBaseUrl = 'https://www.strava.com/api/v3'
-const sessions = new Map()
+const sessionStorePath = fileURLToPath(new URL('../../.data/sessions.json', import.meta.url))
+const sessions = loadSessions()
 
 app.use(cors({ origin: frontendUrl, credentials: true }))
 app.use(express.json())
@@ -70,6 +79,7 @@ app.get('/api/strava/connect', (request, response) => {
   const state = crypto.randomUUID()
 
   session.oauthState = state
+  persistSessions()
 
   const params = new URLSearchParams({
     client_id: config.clientId,
@@ -102,12 +112,14 @@ app.get('/api/strava/callback', async (request, response) => {
 
   if (error) {
     delete session.oauthState
+    persistSessions()
     response.redirect(`${frontendUrl}?strava=error&reason=${encodeURIComponent(error)}`)
     return
   }
 
   if (!code) {
     delete session.oauthState
+    persistSessions()
     response.redirect(`${frontendUrl}?strava=error&reason=missing_code`)
     return
   }
@@ -122,10 +134,13 @@ app.get('/api/strava/callback', async (request, response) => {
 
     session.strava = normalizeStravaToken(tokenPayload)
     delete session.oauthState
+    session.updatedAt = Date.now()
+    persistSessions()
 
     response.redirect(`${frontendUrl}?strava=connected`)
   } catch (tokenError) {
     delete session.oauthState
+    persistSessions()
     response.redirect(`${frontendUrl}?strava=error&reason=token_exchange`)
   }
 })
@@ -165,6 +180,8 @@ app.get('/api/strava/activities', async (request, response) => {
 
       if (activitiesResponse.status === 401) {
         delete session.strava
+        session.updatedAt = Date.now()
+        persistSessions()
       }
 
       response.status(activitiesResponse.status).json({
@@ -193,6 +210,8 @@ app.post('/api/strava/disconnect', (request, response) => {
   if (session) {
     delete session.oauthState
     delete session.strava
+    session.updatedAt = Date.now()
+    persistSessions()
   }
 
   response.json({ ok: true })
@@ -243,18 +262,17 @@ function getSession(request) {
     return null
   }
 
-  return sessions.get(sessionId) || null
+  return getSessionById(sessionId)
 }
 
 function ensureSession(request, response) {
   const cookies = parseCookies(request.headers.cookie)
   let sessionId = cookies[sessionCookieName]
 
-  if (!sessionId || !sessions.has(sessionId)) {
+  if (!sessionId || !getSessionById(sessionId)) {
     sessionId = crypto.randomUUID()
-    sessions.set(sessionId, {
-      createdAt: Date.now(),
-    })
+    sessions.set(sessionId, createSessionRecord())
+    persistSessions()
     response.setHeader('Set-Cookie', serializeCookie(sessionCookieName, sessionId))
   }
 
@@ -323,6 +341,8 @@ async function getValidAccessToken(session, config) {
     athlete: session.strava.athlete,
     scope: refreshed.scope || session.strava.scope,
   })
+  session.updatedAt = Date.now()
+  persistSessions()
 
   return session.strava.accessToken
 }
@@ -363,4 +383,80 @@ async function safeReadText(response) {
   } catch {
     return 'Unable to read response body.'
   }
+}
+
+function createSessionRecord() {
+  const now = Date.now()
+
+  return {
+    createdAt: now,
+    updatedAt: now,
+  }
+}
+
+function getSessionById(sessionId) {
+  pruneExpiredSessions()
+
+  const session = sessions.get(sessionId)
+
+  return session || null
+}
+
+function loadSessions() {
+  if (!existsSync(sessionStorePath)) {
+    return new Map()
+  }
+
+  try {
+    const raw = readFileSync(sessionStorePath, 'utf8')
+    const parsed = JSON.parse(raw)
+    const now = Date.now()
+    const loadedSessions = new Map()
+
+    for (const [sessionId, session] of Object.entries(parsed)) {
+      if (!session || typeof session !== 'object') {
+        continue
+      }
+
+      const updatedAt = Number(session.updatedAt || session.createdAt || 0)
+
+      if (!updatedAt || now - updatedAt > sessionTtlMs) {
+        continue
+      }
+
+      loadedSessions.set(sessionId, session)
+    }
+
+    return loadedSessions
+  } catch (error) {
+    console.warn('Failed to load persisted sessions:', error)
+    return new Map()
+  }
+}
+
+function persistSessions() {
+  pruneExpiredSessions()
+  mkdirSync(fileURLToPath(new URL('../../.data', import.meta.url)), { recursive: true })
+
+  const serializedSessions = Object.fromEntries(sessions)
+  const tempPath = `${sessionStorePath}.tmp`
+
+  writeFileSync(tempPath, JSON.stringify(serializedSessions, null, 2))
+  renameSync(tempPath, sessionStorePath)
+}
+
+function pruneExpiredSessions() {
+  const now = Date.now()
+  let removedAny = false
+
+  for (const [sessionId, session] of sessions.entries()) {
+    const updatedAt = Number(session?.updatedAt || session?.createdAt || 0)
+
+    if (!updatedAt || now - updatedAt > sessionTtlMs) {
+      sessions.delete(sessionId)
+      removedAny = true
+    }
+  }
+
+  return removedAny
 }
