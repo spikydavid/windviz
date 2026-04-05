@@ -427,10 +427,10 @@ function renderRouteWeatherForActivity(activity) {
   }
 
   drawRouteWindSamples(projected, routeState.samples)
-  drawRoutePlayhead(projected, playheadIndex, getInterpolatedWindAtIndex(routeState.samples, playheadIndex))
+  drawRoutePlayhead(projected, playheadIndex, getNearestWindAtIndex(routeState.samples, playheadIndex))
   updateRouteLiveWind(activity, routeState, playheadIndex)
   syncRoutePlaybackControls(playbackState.progress, playbackState.isPlaying)
-  routeMeta.textContent = `Showing ${routeState.samples.length} wind samples along route.`
+  routeMeta.textContent = `Showing point-level wind samples for ${routeState.samples.length} route points.`
 }
 
 async function loadWeather(activity) {
@@ -489,7 +489,7 @@ async function loadRouteWeather(activity) {
 
   routeWindByActivityId.set(activity.id, { status: 'loading' })
 
-  const sampleCount = Math.min(14, routePoints.length)
+  const sampleCount = routePoints.length
   const startTimeMs = new Date(activity.startDateUtc).getTime()
   const totalDurationMs = Number(activity.elapsedTimeSeconds) * 1000
 
@@ -505,7 +505,7 @@ async function loadRouteWeather(activity) {
 
   for (let i = 0; i < sampleCount; i += 1) {
     const ratio = sampleCount === 1 ? 0 : i / (sampleCount - 1)
-    const routeIndex = Math.round(ratio * (routePoints.length - 1))
+    const routeIndex = i
     const point = routePoints[routeIndex]
 
     samplePoints.push({
@@ -749,54 +749,26 @@ function syncRoutePlaybackControls(progress, isPlaying) {
   routePlayToggle.textContent = isPlaying ? 'Pause route' : progress >= 1 ? 'Replay route' : 'Play route'
 }
 
-function getInterpolatedWindAtIndex(samples, targetIndex) {
+function getNearestWindAtIndex(samples, targetIndex) {
   if (!Array.isArray(samples) || samples.length === 0) {
     return null
   }
 
-  const ordered = [...samples].sort((left, right) => left.routeIndex - right.routeIndex)
+  let bestSample = null
+  let bestDiff = Number.POSITIVE_INFINITY
 
-  if (targetIndex <= ordered[0].routeIndex) {
-    return ordered[0].weather
-  }
+  for (const sample of samples) {
+    const diff = Math.abs(sample.routeIndex - targetIndex)
 
-  if (targetIndex >= ordered[ordered.length - 1].routeIndex) {
-    return ordered[ordered.length - 1].weather
-  }
-
-  for (let i = 0; i < ordered.length - 1; i += 1) {
-    const before = ordered[i]
-    const after = ordered[i + 1]
-
-    if (targetIndex < before.routeIndex || targetIndex > after.routeIndex) {
+    if (diff >= bestDiff) {
       continue
     }
 
-    if (before.routeIndex === after.routeIndex) {
-      return before.weather
-    }
-
-    const t = (targetIndex - before.routeIndex) / (after.routeIndex - before.routeIndex)
-    const beforeRadians = (before.weather.windDirectionDeg * Math.PI) / 180
-    const afterRadians = (after.weather.windDirectionDeg * Math.PI) / 180
-    const beforeX = Math.cos(beforeRadians) * before.weather.windSpeedKph
-    const beforeY = Math.sin(beforeRadians) * before.weather.windSpeedKph
-    const afterX = Math.cos(afterRadians) * after.weather.windSpeedKph
-    const afterY = Math.sin(afterRadians) * after.weather.windSpeedKph
-    const mixedX = beforeX + (afterX - beforeX) * t
-    const mixedY = beforeY + (afterY - beforeY) * t
-    const mixedSpeed = Math.sqrt(mixedX ** 2 + mixedY ** 2)
-    const mixedDirection = ((Math.atan2(mixedY, mixedX) * 180) / Math.PI + 360) % 360
-
-    return {
-      source: before.weather.source,
-      sampleTimeUtc: before.weather.sampleTimeUtc,
-      windSpeedKph: mixedSpeed,
-      windDirectionDeg: mixedDirection,
-    }
+    bestDiff = diff
+    bestSample = sample
   }
 
-  return ordered[0].weather
+  return bestSample?.weather || null
 }
 
 function drawRoutePlayhead(projectedPoints, playheadIndex, wind) {
@@ -845,7 +817,7 @@ function updateRouteLiveWind(activity, routeState, playheadIndex) {
     return
   }
 
-  const wind = getInterpolatedWindAtIndex(routeState.samples, playheadIndex)
+  const wind = getNearestWindAtIndex(routeState.samples, playheadIndex)
 
   if (!wind) {
     routeLiveWind.textContent = 'No wind sample available at current playhead.'

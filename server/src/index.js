@@ -308,45 +308,57 @@ app.post('/api/weather/wind-track', async (request, response) => {
     return
   }
 
-  const pointLimit = 40
-  const safePoints = points.slice(0, pointLimit)
+  const pointLimit = 20000
+
+  if (points.length > pointLimit) {
+    response.status(400).json({
+      error: `Too many points. Maximum supported points per request is ${pointLimit}.`,
+    })
+    return
+  }
+
+  const safePoints = points
   const cache = new Map()
 
   try {
-    const samples = await Promise.all(
-      safePoints.map(async (point, idx) => {
-        const latitude = Number(point.lat)
-        const longitude = Number(point.lon)
-        const dateTime = String(point.dateTime || '')
+    const samples = []
 
-        if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !dateTime) {
-          return {
-            index: Number.isFinite(Number(point.index)) ? Number(point.index) : idx,
-            error: 'Invalid point payload.',
-          }
-        }
+    for (let idx = 0; idx < safePoints.length; idx += 1) {
+      const point = safePoints[idx]
+      const latitude = Number(point.lat)
+      const longitude = Number(point.lon)
+      const dateTime = String(point.dateTime || '')
+      const pointIndex = Number.isFinite(Number(point.index)) ? Number(point.index) : idx
 
-        const cacheKey = buildWeatherCacheKey(latitude, longitude, dateTime)
-        let weather = cache.get(cacheKey)
+      if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !dateTime) {
+        samples.push({
+          index: pointIndex,
+          error: 'Invalid point payload.',
+        })
+        continue
+      }
 
-        if (!weather) {
-          weather = await fetchWindWeather(latitude, longitude, dateTime)
-          cache.set(cacheKey, weather)
-        }
+      const cacheKey = buildWeatherCacheKey(latitude, longitude, dateTime)
+      let weather = cache.get(cacheKey)
 
-        if (!weather) {
-          return {
-            index: Number.isFinite(Number(point.index)) ? Number(point.index) : idx,
-            error: 'No weather sample available.',
-          }
-        }
+      if (!weather) {
+        weather = await fetchWindWeather(latitude, longitude, dateTime)
+        cache.set(cacheKey, weather)
+      }
 
-        return {
-          index: Number.isFinite(Number(point.index)) ? Number(point.index) : idx,
-          weather,
-        }
-      }),
-    )
+      if (!weather) {
+        samples.push({
+          index: pointIndex,
+          error: 'No weather sample available.',
+        })
+        continue
+      }
+
+      samples.push({
+        index: pointIndex,
+        weather,
+      })
+    }
 
     response.json({
       source: 'open-meteo',
