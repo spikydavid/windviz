@@ -26,7 +26,9 @@ const stravaAuthorizeUrl = 'https://www.strava.com/oauth/authorize'
 const stravaTokenUrl = 'https://www.strava.com/oauth/token'
 const stravaApiBaseUrl = 'https://www.strava.com/api/v3'
 const sessionStorePath = fileURLToPath(new URL('../../.data/sessions.json', import.meta.url))
+const stravaConfigStorePath = fileURLToPath(new URL('../../.data/strava-config.json', import.meta.url))
 const sessionEncryptionKey = getSessionEncryptionKey()
+let persistedStravaConfig = loadPersistedStravaConfig()
 const sessions = loadSessions()
 
 app.use(cors({ origin: frontendUrl, credentials: true }))
@@ -56,6 +58,7 @@ app.get('/api/strava/status', async (request, response) => {
     configured: config.configured,
     connected: isConnected,
     secureStorageConfigured: Boolean(sessionEncryptionKey),
+    configSource: config.source,
     athlete: session?.strava?.athlete || null,
     expiresAt: session?.strava?.expiresAt || null,
     scopes: session?.strava?.scope ? session.strava.scope.split(',') : [],
@@ -67,8 +70,61 @@ app.get('/api/strava/status', async (request, response) => {
         : isConnected
           ? 'Strava account connected. Add SESSION_ENCRYPTION_KEY to keep tokens encrypted across restarts.'
           : 'Connect your Strava account to load activities. Add SESSION_ENCRYPTION_KEY to persist encrypted tokens across restarts.'
-      : 'Add STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET to .env.',
+      : 'Add Strava credentials in the app settings panel or through .env.',
   })
+})
+
+app.get('/api/strava/config', (_request, response) => {
+  const config = getStravaConfig()
+
+  response.json({
+    configured: config.configured,
+    source: config.source,
+    redirectUri: config.redirectUri,
+    secureStorageConfigured: Boolean(sessionEncryptionKey),
+    hasStoredConfig: Boolean(persistedStravaConfig),
+  })
+})
+
+app.post('/api/strava/config', (request, response) => {
+  if (!sessionEncryptionKey) {
+    response.status(503).json({
+      error: 'SESSION_ENCRYPTION_KEY is required before storing Strava credentials from the frontend.',
+    })
+    return
+  }
+
+  const clientId = sanitizeConfigValue(request.body?.clientId)
+  const clientSecret = sanitizeConfigValue(request.body?.clientSecret)
+
+  if (!clientId || !clientSecret) {
+    response.status(400).json({
+      error: 'Both clientId and clientSecret are required.',
+    })
+    return
+  }
+
+  const nextConfig = {
+    clientId,
+    clientSecret,
+    updatedAt: Date.now(),
+  }
+
+  savePersistedStravaConfig(nextConfig)
+
+  response.json({
+    ok: true,
+    configured: true,
+    source: 'frontend',
+  })
+})
+
+app.delete('/api/strava/config', (_request, response) => {
+  clearPersistedStravaConfig()
+  clearStravaSessions()
+  persistSessions()
+
+  response.json({ ok: true })
 })
 
 app.get('/api/strava/connect', (request, response) => {
@@ -77,7 +133,7 @@ app.get('/api/strava/connect', (request, response) => {
   if (!config.configured) {
     response.status(503).json({
       error: 'Strava is not configured.',
-      message: 'Set STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, and STRAVA_REDIRECT_URI in .env.',
+      message: 'Set Strava credentials in the frontend settings panel or provide them through .env.',
     })
     return
   }
@@ -229,15 +285,19 @@ app.listen(port, () => {
 })
 
 function getStravaConfig() {
-  const clientId = sanitizeConfigValue(process.env.STRAVA_CLIENT_ID)
-  const clientSecret = sanitizeConfigValue(process.env.STRAVA_CLIENT_SECRET)
+  const envClientId = sanitizeConfigValue(process.env.STRAVA_CLIENT_ID)
+  const envClientSecret = sanitizeConfigValue(process.env.STRAVA_CLIENT_SECRET)
   const redirectUri = process.env.STRAVA_REDIRECT_URI || `${frontendUrl}/api/strava/callback`
+  const clientId = persistedStravaConfig?.clientId || envClientId || ''
+  const clientSecret = persistedStravaConfig?.clientSecret || envClientSecret || ''
+  const source = persistedStravaConfig ? 'frontend' : envClientId && envClientSecret ? 'env' : 'none'
 
   return {
     clientId,
     clientSecret,
     redirectUri,
     configured: Boolean(clientId && clientSecret),
+    source,
   }
 }
 
@@ -269,6 +329,35 @@ function getSessionEncryptionKey() {
   }
 
   return Buffer.from(rawKey, 'hex')
+}
+
+function loadPersistedStravaConfig() {
+  if (!existsSync(stravaConfigStorePath)) {
+    return null
+  }
+
+  if (!sessionEncryptionKey) {
+    return null
+  }
+
+  try {
+    const raw = readFileSync(stravaConfigStorePath, 'utf8')
+    const parsed = JSON.parse(raw)
+    const decrypted = decryptPayload(parsed.encryptedConfig)
+
+    if (!decrypted?.clientId || !decrypted?.clientSecret) {
+      return null
+    }
+
+    return {
+      clientId: sanitizeConfigValue(decrypted.clientId),
+      clientSecret: sanitizeConfigValue(decrypted.clientSecret),
+      updatedAt: Number(parsed.updatedAt || Date.now()),
+    }
+  } catch (error) {
+    console.warn('Failed to load persisted Strava config:', error)
+    return null
+  }
 }
 
 function parseCookies(cookieHeader = '') {
@@ -482,6 +571,48 @@ function persistSessions() {
 
   writeFileSync(tempPath, JSON.stringify(serializedSessions, null, 2))
   renameSync(tempPath, sessionStorePath)
+}
+
+function savePersistedStravaConfig(config) {
+  persistedStravaConfig = {
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
+    updatedAt: config.updatedAt,
+  }
+
+  mkdirSync(fileURLToPath(new URL('../../.data', import.meta.url)), { recursive: true })
+
+  const encryptedConfig = encryptPayload({
+    clientId: config.clientId,
+    clientSecret: config.clientSecret,
+  })
+  const tempPath = `${stravaConfigStorePath}.tmp`
+  const serialized = {
+    updatedAt: config.updatedAt,
+    encryptedConfig,
+  }
+
+  writeFileSync(tempPath, JSON.stringify(serialized, null, 2))
+  renameSync(tempPath, stravaConfigStorePath)
+}
+
+function clearPersistedStravaConfig() {
+  persistedStravaConfig = null
+
+  if (!existsSync(stravaConfigStorePath)) {
+    return
+  }
+
+  writeFileSync(`${stravaConfigStorePath}.tmp`, JSON.stringify({}, null, 2))
+  renameSync(`${stravaConfigStorePath}.tmp`, stravaConfigStorePath)
+}
+
+function clearStravaSessions() {
+  for (const session of sessions.values()) {
+    delete session.oauthState
+    delete session.strava
+    session.updatedAt = Date.now()
+  }
 }
 
 function pruneExpiredSessions() {

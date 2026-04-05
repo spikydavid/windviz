@@ -20,6 +20,32 @@ app.innerHTML = `
       </div>
     </section>
 
+    <section class="panel panel-config">
+      <div class="section-heading">
+        <div>
+          <p class="panel-label">App settings</p>
+          <h2>Strava API credentials</h2>
+        </div>
+      </div>
+      <form id="config-form" class="config-form">
+        <label>
+          <span>Client ID</span>
+          <input id="client-id" name="clientId" type="text" autocomplete="off" placeholder="Enter your Strava client ID" />
+        </label>
+        <label>
+          <span>Client secret</span>
+          <input id="client-secret" name="clientSecret" type="password" autocomplete="new-password" placeholder="Enter your Strava client secret" />
+        </label>
+        <div class="config-actions">
+          <button id="save-config" type="submit">Save credentials</button>
+          <button id="clear-config" type="button" class="secondary">Clear saved credentials</button>
+        </div>
+      </form>
+      <p id="config-note" class="config-note">
+        Credentials entered here are sent to the backend and stored encrypted locally.
+      </p>
+    </section>
+
     <section class="panel panel-status">
       <div>
         <p class="panel-label">Connection</p>
@@ -45,12 +71,19 @@ app.innerHTML = `
 const connectButton = document.querySelector('#connect-strava')
 const refreshButton = document.querySelector('#refresh-activities')
 const disconnectButton = document.querySelector('#disconnect-strava')
+const configForm = document.querySelector('#config-form')
+const clientIdInput = document.querySelector('#client-id')
+const clientSecretInput = document.querySelector('#client-secret')
+const clearConfigButton = document.querySelector('#clear-config')
+const configNote = document.querySelector('#config-note')
 const status = document.querySelector('#status')
 const messageTitle = document.querySelector('#message-title')
 const messageBody = document.querySelector('#message-body')
 const payload = document.querySelector('#payload')
 const activitiesEmpty = document.querySelector('#activities-empty')
 const activitiesList = document.querySelector('#activities-list')
+
+let currentConfigSource = 'none'
 
 async function requestJson(url, options) {
   const response = await fetch(url, options)
@@ -67,6 +100,8 @@ function setBusyState(isBusy) {
   connectButton.disabled = isBusy
   refreshButton.disabled = isBusy
   disconnectButton.disabled = isBusy
+  clearConfigButton.disabled = isBusy
+  configForm.querySelector('button[type="submit"]').disabled = isBusy
 }
 
 function renderActivities(activities) {
@@ -126,6 +161,7 @@ async function loadStatus() {
       : 'Strava credentials missing'
   messageBody.textContent = data.message
   payload.textContent = JSON.stringify(data, null, 2)
+  currentConfigSource = data.configSource
 
   if (data.connected) {
     await loadActivities()
@@ -134,7 +170,27 @@ async function loadStatus() {
     activitiesEmpty.hidden = false
     activitiesEmpty.textContent = data.configured
       ? 'Connect Strava to load activities.'
-      : 'Add credentials in .env before connecting Strava.'
+      : 'Add credentials in the settings panel before connecting Strava.'
+  }
+}
+
+async function loadConfig() {
+  const data = await requestJson('/api/strava/config')
+
+  clearConfigButton.disabled = !data.hasStoredConfig
+  clientSecretInput.value = ''
+
+  if (data.source === 'frontend') {
+    clientIdInput.placeholder = 'A saved frontend client ID is active'
+    configNote.textContent = 'Frontend-saved Strava credentials are active and stored encrypted on the backend.'
+  } else if (data.source === 'env') {
+    clientIdInput.placeholder = 'Env credentials are active'
+    configNote.textContent = 'Env credentials are currently active. Saving here will override them for this app.'
+  } else {
+    clientIdInput.placeholder = 'Enter your Strava client ID'
+    configNote.textContent = data.secureStorageConfigured
+      ? 'Credentials entered here are sent to the backend and stored encrypted locally.'
+      : 'Add SESSION_ENCRYPTION_KEY first. Without it, frontend-saved credentials cannot be stored securely.'
   }
 }
 
@@ -169,6 +225,55 @@ async function disconnectStrava() {
       },
     })
     renderActivities([])
+    await loadStatus()
+  } catch (error) {
+    payload.textContent = error instanceof Error ? error.message : String(error)
+    status.textContent = 'Error'
+  } finally {
+    setBusyState(false)
+  }
+}
+
+async function saveConfig(event) {
+  event.preventDefault()
+  setBusyState(true)
+
+  try {
+    await requestJson('/api/strava/config', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        clientId: clientIdInput.value,
+        clientSecret: clientSecretInput.value,
+      }),
+    })
+
+    clientSecretInput.value = ''
+    status.textContent = 'Saved'
+    await loadConfig()
+    await loadStatus()
+  } catch (error) {
+    payload.textContent = error instanceof Error ? error.message : String(error)
+    status.textContent = 'Error'
+  } finally {
+    setBusyState(false)
+  }
+}
+
+async function clearConfig() {
+  setBusyState(true)
+
+  try {
+    await requestJson('/api/strava/config', {
+      method: 'DELETE',
+    })
+
+    clientIdInput.value = ''
+    clientSecretInput.value = ''
+    status.textContent = 'Cleared'
+    await loadConfig()
     await loadStatus()
   } catch (error) {
     payload.textContent = error instanceof Error ? error.message : String(error)
@@ -227,11 +332,13 @@ connectButton.addEventListener('click', () => {
   window.location.href = '/api/strava/connect'
 })
 
+configForm.addEventListener('submit', saveConfig)
+clearConfigButton.addEventListener('click', clearConfig)
 refreshButton.addEventListener('click', loadActivities)
 disconnectButton.addEventListener('click', disconnectStrava)
 
 handleCallbackState()
-loadStatus().catch((error) => {
+Promise.all([loadConfig(), loadStatus()]).catch((error) => {
   messageTitle.textContent = 'Setup check failed'
   messageBody.textContent = 'The frontend could not retrieve backend integration status.'
   payload.textContent = error instanceof Error ? error.message : String(error)
