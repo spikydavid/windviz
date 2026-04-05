@@ -16,17 +16,15 @@ app.innerHTML = `
         <button id="connect-strava" type="button">Connect Strava</button>
         <button id="refresh-activities" type="button">Load activities</button>
         <button id="disconnect-strava" type="button" class="secondary">Disconnect</button>
+        <label class="provider-select-label" for="weather-provider">Weather provider</label>
+        <select id="weather-provider" class="provider-select" aria-label="Weather provider">
+          <option value="auto">Auto</option>
+          <option value="open-meteo">Open-Meteo Best Match</option>
+          <option value="open-meteo-era5">Open-Meteo ERA5</option>
+          <option value="reading-sc-rss">Reading Sailing Club RSS</option>
+        </select>
         <span id="status" class="status">Checking setup...</span>
       </div>
-    </section>
-
-    <section class="panel panel-status">
-      <div>
-        <p class="panel-label">Connection</p>
-        <h2 id="message-title">Preparing Strava integration</h2>
-        <p id="message-body">Checking whether Strava credentials are configured.</p>
-      </div>
-      <pre id="payload" class="payload">Waiting for status...</pre>
     </section>
 
     <section class="panel panel-activities">
@@ -59,14 +57,20 @@ app.innerHTML = `
           </section>
           <section class="weather-block">
             <p class="panel-label">Wind at activity start</p>
-            <div id="wind-visual" class="wind-visual" aria-hidden="true">
-              <div class="wind-needle-wrap">
-                <span id="wind-needle" class="wind-needle"></span>
+            <div class="wind-live-row">
+              <div id="wind-visual" class="wind-visual" aria-hidden="true">
+                <div class="wind-needle-wrap">
+                  <span id="wind-needle" class="wind-needle"></span>
+                </div>
+                <span class="wind-n">N</span>
+                <span class="wind-e">E</span>
+                <span class="wind-s">S</span>
+                <span class="wind-w">W</span>
               </div>
-              <span class="wind-n">N</span>
-              <span class="wind-e">E</span>
-              <span class="wind-s">S</span>
-              <span class="wind-w">W</span>
+              <div class="wind-live-speed-wrap">
+                <p class="wind-live-speed-label">Wind speed</p>
+                <p id="wind-live-speed" class="wind-live-speed">-</p>
+              </div>
             </div>
             <p id="wind-summary" class="wind-summary">Select an activity to load wind data.</p>
             <p id="wind-meta" class="wind-meta"></p>
@@ -74,12 +78,22 @@ app.innerHTML = `
         </article>
       </div>
     </section>
+
+    <section class="panel panel-status">
+      <div>
+        <p class="panel-label">Connection</p>
+        <h2 id="message-title">Preparing Strava integration</h2>
+        <p id="message-body">Checking whether Strava credentials are configured.</p>
+      </div>
+      <pre id="payload" class="payload">Waiting for status...</pre>
+    </section>
   </main>
 `
 
 const connectButton = document.querySelector('#connect-strava')
 const refreshButton = document.querySelector('#refresh-activities')
 const disconnectButton = document.querySelector('#disconnect-strava')
+const weatherProviderSelect = document.querySelector('#weather-provider')
 const status = document.querySelector('#status')
 const messageTitle = document.querySelector('#message-title')
 const messageBody = document.querySelector('#message-body')
@@ -100,14 +114,19 @@ const routeMeta = document.querySelector('#route-meta')
 const windNeedle = document.querySelector('#wind-needle')
 const windSummary = document.querySelector('#wind-summary')
 const windMeta = document.querySelector('#wind-meta')
+const windLiveSpeed = document.querySelector('#wind-live-speed')
 
 let currentConfigSource = 'none'
+const weatherProviderStorageKey = 'windviz_weather_provider'
+const supportedWeatherProviders = new Set(['auto', 'open-meteo', 'open-meteo-era5', 'reading-sc-rss'])
+let selectedWeatherProvider = loadSelectedWeatherProvider()
 let currentActivities = []
 let selectedActivityId = null
 const weatherByActivityId = new Map()
 const routeWindByActivityId = new Map()
 const routePlaybackByActivityId = new Map()
 let routePlaybackFrameId = null
+let windSpeedFlashTimeoutId = null
 async function requestJson(url, options) {
   const response = await fetch(url, options)
   const data = await response.json().catch(() => null)
@@ -123,6 +142,50 @@ function setBusyState(isBusy) {
   connectButton.disabled = isBusy
   refreshButton.disabled = isBusy
   disconnectButton.disabled = isBusy
+}
+
+function loadSelectedWeatherProvider() {
+  const saved = localStorage.getItem(weatherProviderStorageKey) || 'auto'
+
+  if (!supportedWeatherProviders.has(saved)) {
+    return 'auto'
+  }
+
+  return saved
+}
+
+function getWeatherProviderOverride() {
+  if (!selectedWeatherProvider || selectedWeatherProvider === 'auto') {
+    return ''
+  }
+
+  return selectedWeatherProvider
+}
+
+async function handleWeatherProviderChange(event) {
+  const nextProvider = String(event.target.value || 'auto')
+
+  if (!supportedWeatherProviders.has(nextProvider) || nextProvider === selectedWeatherProvider) {
+    return
+  }
+
+  selectedWeatherProvider = nextProvider
+  localStorage.setItem(weatherProviderStorageKey, selectedWeatherProvider)
+
+  weatherByActivityId.clear()
+  routeWindByActivityId.clear()
+  stopRoutePlayback()
+
+  const selected = currentActivities.find((activity) => activity.id === selectedActivityId)
+
+  if (!selected) {
+    return
+  }
+
+  renderWeatherPlaceholder('Loading wind data...')
+  renderRoutePlaceholder('Loading wind samples along route...')
+  await preloadSelectedWeather()
+  await preloadSelectedRouteWeather()
 }
 
 function renderActivities(activities) {
@@ -362,6 +425,46 @@ function renderWeatherPlaceholder(message) {
   windSummary.textContent = message
   windMeta.textContent = ''
   windNeedle.style.transform = 'translate(-50%, -100%) rotate(0deg)'
+  windLiveSpeed.textContent = '-'
+  windLiveSpeed.classList.remove('is-updating')
+
+  if (windSpeedFlashTimeoutId) {
+    clearTimeout(windSpeedFlashTimeoutId)
+    windSpeedFlashTimeoutId = null
+  }
+}
+
+function flashWindSpeedUpdate() {
+  windLiveSpeed.classList.remove('is-updating')
+  void windLiveSpeed.offsetWidth
+  windLiveSpeed.classList.add('is-updating')
+
+  if (windSpeedFlashTimeoutId) {
+    clearTimeout(windSpeedFlashTimeoutId)
+  }
+
+  windSpeedFlashTimeoutId = window.setTimeout(() => {
+    windLiveSpeed.classList.remove('is-updating')
+    windSpeedFlashTimeoutId = null
+  }, 360)
+}
+
+function applyWindToVisuals(wind, contextLabel) {
+  if (!wind) {
+    renderWeatherPlaceholder('No wind sample available.')
+    return
+  }
+
+  const nextSpeedText = `${wind.windSpeedKph.toFixed(1)} km/h`
+
+  if (windLiveSpeed.textContent !== nextSpeedText) {
+    flashWindSpeedUpdate()
+  }
+
+  windSummary.textContent = `${wind.windSpeedKph.toFixed(1)} km/h from ${toCompass(wind.windDirectionDeg)} (${Math.round(wind.windDirectionDeg)}deg)`
+  windMeta.textContent = `${contextLabel} at ${formatDate(wind.sampleTimeUtc)} via ${wind.metadata?.provider || wind.provider || wind.source}`
+  windNeedle.style.transform = `translate(-50%, -100%) rotate(${wind.windDirectionDeg}deg)`
+  windLiveSpeed.textContent = nextSpeedText
 }
 
 function renderWeatherForActivity(activity) {
@@ -382,11 +485,7 @@ function renderWeatherForActivity(activity) {
     return
   }
 
-  const weather = weatherState.data
-
-  windSummary.textContent = `${weather.windSpeedKph.toFixed(1)} km/h from ${toCompass(weather.windDirectionDeg)} (${Math.round(weather.windDirectionDeg)}deg)`
-  windMeta.textContent = `Sampled at ${formatDate(weather.sampleTimeUtc)} via ${weather.source}`
-  windNeedle.style.transform = `translate(-50%, -100%) rotate(${weather.windDirectionDeg}deg)`
+  applyWindToVisuals(weatherState.data, 'Activity-start sample')
 }
 
 function renderRoutePlaceholder(message) {
@@ -430,7 +529,8 @@ function renderRouteWeatherForActivity(activity) {
   drawRoutePlayhead(projected, playheadIndex, getNearestWindAtIndex(routeState.samples, playheadIndex))
   updateRouteLiveWind(activity, routeState, playheadIndex)
   syncRoutePlaybackControls(playbackState.progress, playbackState.isPlaying)
-  routeMeta.textContent = `Showing point-level wind samples for ${routeState.samples.length} route points.`
+  const routeProvider = routeState.provider || 'selected provider'
+  routeMeta.textContent = `Showing point-level wind samples for ${routeState.samples.length} route points via ${routeProvider}.`
 }
 
 async function loadWeather(activity) {
@@ -456,6 +556,13 @@ async function loadWeather(activity) {
       lon: String(activity.startLongitude),
       dateTime: String(activity.startDateUtc),
     })
+
+    const providerOverride = getWeatherProviderOverride()
+
+    if (providerOverride) {
+      params.set('provider', providerOverride)
+    }
+
     const weather = await requestJson(`/api/weather/wind?${params.toString()}`)
 
     weatherByActivityId.set(activity.id, {
@@ -523,6 +630,7 @@ async function loadRouteWeather(activity) {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
+        provider: getWeatherProviderOverride() || undefined,
         points: samplePoints,
       }),
     })
@@ -536,6 +644,7 @@ async function loadRouteWeather(activity) {
 
     routeWindByActivityId.set(activity.id, {
       status: 'ready',
+      provider: response.provider || response.source || null,
       samples,
     })
   } catch (error) {
@@ -814,6 +923,7 @@ function drawRoutePlayhead(projectedPoints, playheadIndex, wind) {
 function updateRouteLiveWind(activity, routeState, playheadIndex) {
   if (!routeState || routeState.status !== 'ready') {
     routeLiveWind.textContent = 'Wind at playhead will appear once route samples load.'
+    renderWeatherForActivity(activity)
     return
   }
 
@@ -821,10 +931,12 @@ function updateRouteLiveWind(activity, routeState, playheadIndex) {
 
   if (!wind) {
     routeLiveWind.textContent = 'No wind sample available at current playhead.'
+    renderWeatherForActivity(activity)
     return
   }
 
   routeLiveWind.textContent = `Playhead wind: ${wind.windSpeedKph.toFixed(1)} km/h from ${toCompass(wind.windDirectionDeg)} (${Math.round(wind.windDirectionDeg)}deg)`
+  applyWindToVisuals(wind, 'Playhead sample')
 }
 
 function decodePolyline(encoded) {
@@ -942,6 +1054,8 @@ connectButton.addEventListener('click', () => {
 
 refreshButton.addEventListener('click', loadActivities)
 disconnectButton.addEventListener('click', disconnectStrava)
+weatherProviderSelect.value = selectedWeatherProvider
+weatherProviderSelect.addEventListener('change', handleWeatherProviderChange)
 activitiesList.addEventListener('click', handleActivitySelection)
 routePlayToggle.addEventListener('click', handleRoutePlayToggle)
 routeProgress.addEventListener('input', handleRouteScrub)

@@ -25,11 +25,26 @@ const sessionEncryptionAlgorithm = 'aes-256-gcm'
 const stravaAuthorizeUrl = 'https://www.strava.com/oauth/authorize'
 const stravaTokenUrl = 'https://www.strava.com/oauth/token'
 const stravaApiBaseUrl = 'https://www.strava.com/api/v3'
+const weatherDefaultProviderId = process.env.WEATHER_PROVIDER || 'auto'
+const readingScRssUrl = 'https://www.weather.readingsc.org.uk/rss.xml'
+const readingScStation = {
+  name: 'Reading Sailing Club, Sonning Eye',
+  latitude: 51.472965,
+  longitude: -0.921005,
+}
+const readingScMaxDistanceKm = Number(process.env.READING_SC_MAX_DISTANCE_KM || 80)
+const readingScMaxSampleAgeMinutes = Number(process.env.READING_SC_MAX_SAMPLE_AGE_MINUTES || 180)
+const readingScFetchTtlMs = 2 * 60 * 1000
 const sessionStorePath = fileURLToPath(new URL('../../.data/sessions.json', import.meta.url))
 const stravaConfigStorePath = fileURLToPath(new URL('../../.data/strava-config.json', import.meta.url))
 const sessionEncryptionKey = getSessionEncryptionKey()
 let persistedStravaConfig = loadPersistedStravaConfig()
 const sessions = loadSessions()
+const weatherProviders = createWeatherProviders()
+const readingScObservationCache = {
+  fetchedAt: 0,
+  observation: null,
+}
 
 app.use(cors({ origin: frontendUrl, credentials: true }))
 app.use(express.json())
@@ -271,6 +286,11 @@ app.get('/api/weather/wind', async (request, response) => {
   const latitude = Number(request.query.lat)
   const longitude = Number(request.query.lon)
   const dateTime = request.query.dateTime
+  const provider = selectWeatherProvider(request.query.provider, {
+    latitude,
+    longitude,
+    dateTime: String(dateTime || ''),
+  })
 
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !dateTime) {
     response.status(400).json({
@@ -279,8 +299,20 @@ app.get('/api/weather/wind', async (request, response) => {
     return
   }
 
+  if (!provider) {
+    response.status(400).json({
+      error: 'Unsupported weather provider.',
+      supportedProviders: Array.from(weatherProviders.keys()),
+    })
+    return
+  }
+
   try {
-    const weather = await fetchWindWeather(latitude, longitude, String(dateTime))
+    const weather = await provider.getPointWind({
+      latitude,
+      longitude,
+      dateTime: String(dateTime),
+    })
 
     if (!weather) {
       response.status(404).json({
@@ -289,7 +321,16 @@ app.get('/api/weather/wind', async (request, response) => {
       return
     }
 
-    response.json(weather)
+    response.json({
+      ...weather,
+      metadata: {
+        provider: provider.id,
+        model: provider.model,
+        resolutionKm: provider.resolutionKm,
+        interpolationMode: provider.interpolationMode,
+        selectionMode: String(request.query.provider || '').trim() ? 'explicit' : provider.selectionMode,
+      },
+    })
   } catch (weatherError) {
     response.status(502).json({
       error: 'Failed to load wind data.',
@@ -300,10 +341,19 @@ app.get('/api/weather/wind', async (request, response) => {
 
 app.post('/api/weather/wind-track', async (request, response) => {
   const points = Array.isArray(request.body?.points) ? request.body.points : null
+  const provider = selectWeatherProvider(request.body?.provider, deriveTrackSelectionContext(points || []))
 
   if (!points || points.length === 0) {
     response.status(400).json({
       error: 'Request body must include a non-empty points array.',
+    })
+    return
+  }
+
+  if (!provider) {
+    response.status(400).json({
+      error: 'Unsupported weather provider.',
+      supportedProviders: Array.from(weatherProviders.keys()),
     })
     return
   }
@@ -338,11 +388,11 @@ app.post('/api/weather/wind-track', async (request, response) => {
         continue
       }
 
-      const cacheKey = buildWeatherCacheKey(latitude, longitude, dateTime)
+      const cacheKey = buildWeatherCacheKey(provider.id, latitude, longitude, dateTime)
       let weather = cache.get(cacheKey)
 
       if (!weather) {
-        weather = await fetchWindWeather(latitude, longitude, dateTime)
+        weather = await provider.getPointWind({ latitude, longitude, dateTime })
         cache.set(cacheKey, weather)
       }
 
@@ -361,7 +411,12 @@ app.post('/api/weather/wind-track', async (request, response) => {
     }
 
     response.json({
-      source: 'open-meteo',
+      source: provider.source,
+      provider: provider.id,
+      model: provider.model,
+      resolutionKm: provider.resolutionKm,
+      interpolationMode: provider.interpolationMode,
+      selectionMode: String(request.body?.provider || '').trim() ? 'explicit' : provider.selectionMode,
       samples,
       limitedTo: pointLimit,
     })
@@ -625,7 +680,151 @@ async function safeReadText(response) {
   }
 }
 
-async function fetchWindWeather(latitude, longitude, dateTimeString) {
+function createWeatherProviders() {
+  const providers = new Map()
+
+  providers.set('open-meteo', {
+    id: 'open-meteo',
+    source: 'open-meteo',
+    model: 'best_match',
+    resolutionKm: 11,
+    interpolationMode: 'nearest_hour',
+    selectionMode: 'explicit',
+    getPointWind: async ({ latitude, longitude, dateTime }) =>
+      fetchOpenMeteoArchiveWind({
+        latitude,
+        longitude,
+        dateTimeString: dateTime,
+        providerId: 'open-meteo',
+        model: 'best_match',
+      }),
+  })
+
+  providers.set('open-meteo-era5', {
+    id: 'open-meteo-era5',
+    source: 'open-meteo',
+    model: 'era5',
+    resolutionKm: 25,
+    interpolationMode: 'nearest_hour',
+    selectionMode: 'explicit',
+    getPointWind: async ({ latitude, longitude, dateTime }) =>
+      fetchOpenMeteoArchiveWind({
+        latitude,
+        longitude,
+        dateTimeString: dateTime,
+        providerId: 'open-meteo-era5',
+        model: 'era5',
+        modelsParam: 'era5',
+      }),
+  })
+
+  providers.set('reading-sc-rss', {
+    id: 'reading-sc-rss',
+    source: 'reading-sailing-club',
+    model: 'station_observation',
+    resolutionKm: 1,
+    interpolationMode: 'latest_observation',
+    selectionMode: 'explicit',
+    getPointWind: async ({ latitude, longitude, dateTime }) =>
+      fetchReadingScWind({ latitude, longitude, dateTime }),
+  })
+
+  return providers
+}
+
+function selectWeatherProvider(requestedProvider, context) {
+  const explicitId = String(requestedProvider || '').trim()
+
+  if (explicitId) {
+    return weatherProviders.get(explicitId) || null
+  }
+
+  const configuredDefault = String(weatherDefaultProviderId || '').trim()
+
+  if (configuredDefault && configuredDefault !== 'auto') {
+    return weatherProviders.get(configuredDefault) || null
+  }
+
+  return chooseAutomaticWeatherProvider(context)
+}
+
+function chooseAutomaticWeatherProvider(context) {
+  const bestMatchProvider = weatherProviders.get('open-meteo')
+  const era5Provider = weatherProviders.get('open-meteo-era5')
+
+  if (!bestMatchProvider || !era5Provider) {
+    return null
+  }
+
+  const region = classifyWeatherRegion(context?.latitude, context?.longitude)
+  const ageDays = calculateAgeDays(context?.dateTime)
+
+  if (region === 'na' && ageDays <= 10) {
+    return {
+      ...bestMatchProvider,
+      selectionMode: 'auto_region_age',
+    }
+  }
+
+  if (region === 'eu' && ageDays <= 10) {
+    return {
+      ...bestMatchProvider,
+      selectionMode: 'auto_region_age',
+    }
+  }
+
+  return {
+    ...era5Provider,
+    selectionMode: 'auto_region_age',
+  }
+}
+
+function classifyWeatherRegion(latitude, longitude) {
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return 'other'
+  }
+
+  const isNorthAmerica = latitude >= 15 && latitude <= 72 && longitude >= -170 && longitude <= -50
+  const isEurope = latitude >= 35 && latitude <= 72 && longitude >= -15 && longitude <= 45
+
+  if (isNorthAmerica) {
+    return 'na'
+  }
+
+  if (isEurope) {
+    return 'eu'
+  }
+
+  return 'other'
+}
+
+function calculateAgeDays(dateTime) {
+  const parsed = new Date(String(dateTime || '')).getTime()
+
+  if (Number.isNaN(parsed)) {
+    return Number.POSITIVE_INFINITY
+  }
+
+  const ageMs = Math.max(0, Date.now() - parsed)
+  return ageMs / (24 * 60 * 60 * 1000)
+}
+
+function deriveTrackSelectionContext(points) {
+  if (!Array.isArray(points) || points.length === 0) {
+    return null
+  }
+
+  const middleIndex = Math.floor(points.length / 2)
+  const middlePoint = points[middleIndex] || points[0]
+
+  return {
+    latitude: Number(middlePoint?.lat),
+    longitude: Number(middlePoint?.lon),
+    dateTime: String(middlePoint?.dateTime || ''),
+  }
+}
+
+async function fetchOpenMeteoArchiveWind({ latitude, longitude, dateTimeString, providerId, model, modelsParam }) {
   const activityDate = new Date(dateTimeString)
 
   if (Number.isNaN(activityDate.getTime())) {
@@ -641,6 +840,11 @@ async function fetchWindWeather(latitude, longitude, dateTimeString) {
     hourly: 'wind_speed_10m,wind_direction_10m',
     timezone: 'UTC',
   })
+
+  if (modelsParam) {
+    params.set('models', modelsParam)
+  }
+
   const weatherResponse = await fetch(`https://archive-api.open-meteo.com/v1/archive?${params.toString()}`)
 
   if (!weatherResponse.ok) {
@@ -678,13 +882,167 @@ async function fetchWindWeather(latitude, longitude, dateTimeString) {
 
   return {
     source: 'open-meteo',
+    provider: providerId,
+    model,
+    resolutionKm: model === 'era5' ? 25 : 11,
+    interpolationMode: 'nearest_hour',
     sampleTimeUtc: hourly.time[bestIndex],
     windSpeedKph: Number(hourly.wind_speed_10m[bestIndex]),
     windDirectionDeg: Number(hourly.wind_direction_10m[bestIndex]),
   }
 }
 
-function buildWeatherCacheKey(latitude, longitude, dateTime) {
+async function fetchReadingScWind({ latitude, longitude, dateTime }) {
+  const distanceKm = haversineKm(
+    latitude,
+    longitude,
+    readingScStation.latitude,
+    readingScStation.longitude,
+  )
+
+  if (!Number.isFinite(distanceKm) || distanceKm > readingScMaxDistanceKm) {
+    return null
+  }
+
+  const observation = await getReadingScLatestObservation()
+
+  if (!observation) {
+    return null
+  }
+
+  const requestedTimeMs = new Date(String(dateTime || '')).getTime()
+  const sampleTimeMs = new Date(observation.sampleTimeUtc).getTime()
+
+  if (Number.isNaN(requestedTimeMs) || Number.isNaN(sampleTimeMs)) {
+    return null
+  }
+
+  const sampleGapMinutes = Math.abs(requestedTimeMs - sampleTimeMs) / (60 * 1000)
+
+  if (sampleGapMinutes > readingScMaxSampleAgeMinutes) {
+    return null
+  }
+
+  return {
+    source: 'reading-sailing-club',
+    provider: 'reading-sc-rss',
+    model: 'station_observation',
+    resolutionKm: 1,
+    interpolationMode: 'latest_observation',
+    sampleTimeUtc: observation.sampleTimeUtc,
+    windSpeedKph: observation.windSpeedKph,
+    windDirectionDeg: observation.windDirectionDeg,
+    station: {
+      name: readingScStation.name,
+      latitude: readingScStation.latitude,
+      longitude: readingScStation.longitude,
+      distanceKm: Number(distanceKm.toFixed(2)),
+    },
+  }
+}
+
+async function getReadingScLatestObservation() {
+  const now = Date.now()
+
+  if (
+    readingScObservationCache.observation &&
+    now - readingScObservationCache.fetchedAt < readingScFetchTtlMs
+  ) {
+    return readingScObservationCache.observation
+  }
+
+  const response = await fetch(readingScRssUrl)
+
+  if (!response.ok) {
+    throw new Error(await safeReadText(response))
+  }
+
+  const rssText = await response.text()
+  const observation = parseReadingScRssObservation(rssText)
+
+  readingScObservationCache.fetchedAt = now
+  readingScObservationCache.observation = observation
+
+  return observation
+}
+
+function parseReadingScRssObservation(rssText) {
+  const firstItemMatch = rssText.match(/<item>([\s\S]*?)<\/item>/i)
+
+  if (!firstItemMatch) {
+    return null
+  }
+
+  const firstItem = firstItemMatch[1]
+  const pubDateMatch = firstItem.match(/<pubDate>([^<]+)<\/pubDate>/i)
+  const descriptionMatch = firstItem.match(/<description>([\s\S]*?)<\/description>/i)
+
+  if (!pubDateMatch || !descriptionMatch) {
+    return null
+  }
+
+  const description = decodeXmlEntities(descriptionMatch[1])
+  const windMatch = description.match(/Wind:\s*([0-9]+(?:\.[0-9]+)?)\s*knots?\s*from\s*([0-9]+(?:\.[0-9]+)?)/i)
+
+  if (!windMatch) {
+    return null
+  }
+
+  const windSpeedKnots = Number(windMatch[1])
+  const windDirectionDeg = Number(windMatch[2])
+  const sampleTimeUtc = parseRssPubDateToIso(pubDateMatch[1])
+
+  if (!Number.isFinite(windSpeedKnots) || !Number.isFinite(windDirectionDeg) || !sampleTimeUtc) {
+    return null
+  }
+
+  return {
+    sampleTimeUtc,
+    windSpeedKph: Number((windSpeedKnots * 1.852).toFixed(2)),
+    windDirectionDeg,
+  }
+}
+
+function parseRssPubDateToIso(pubDate) {
+  const normalized = String(pubDate || '')
+    .replace(/\bBST\b/i, 'GMT+0100')
+    .replace(/\bGMT\b/i, 'GMT+0000')
+  const parsed = Date.parse(normalized)
+
+  if (Number.isNaN(parsed)) {
+    return null
+  }
+
+  return new Date(parsed).toISOString()
+}
+
+function decodeXmlEntities(value) {
+  return value
+    .replace(/&#(\d+);/g, (_all, dec) => String.fromCharCode(Number(dec)))
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+}
+
+function haversineKm(lat1, lon1, lat2, lon2) {
+  if (![lat1, lon1, lat2, lon2].every((value) => Number.isFinite(value))) {
+    return Number.NaN
+  }
+
+  const toRad = (degrees) => (degrees * Math.PI) / 180
+  const earthRadiusKm = 6371
+  const dLat = toRad(lat2 - lat1)
+  const dLon = toRad(lon2 - lon1)
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2)
+
+  return earthRadiusKm * (2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)))
+}
+
+function buildWeatherCacheKey(providerId, latitude, longitude, dateTime) {
   const date = new Date(dateTime)
   const hourlyStamp = Number.isNaN(date.getTime())
     ? dateTime
@@ -697,7 +1055,7 @@ function buildWeatherCacheKey(latitude, longitude, dateTime) {
         ),
       ).toISOString()
 
-  return `${latitude.toFixed(2)}:${longitude.toFixed(2)}:${hourlyStamp}`
+  return `${providerId}:${latitude.toFixed(2)}:${longitude.toFixed(2)}:${hourlyStamp}`
 }
 
 function createSessionRecord() {

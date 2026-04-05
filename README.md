@@ -25,6 +25,31 @@ This version includes a Strava integration flow so the app can connect to a Stra
 - `GET /api/strava/callback`: handles the OAuth callback from Strava
 - `GET /api/strava/activities`: returns recent activities for the connected athlete
 - `POST /api/strava/disconnect`: clears the current Strava session
+- `GET /api/weather/wind`: returns point wind data for `lat`, `lon`, and `dateTime`
+- `POST /api/weather/wind-track`: returns route wind samples for a `points` array
+
+### Weather provider selection
+
+- Set `WEATHER_PROVIDER` in `.env` to choose the default weather provider.
+- Supported values:
+	- `auto`: automatic selection by region and activity age (default)
+	- `open-meteo`: Open-Meteo best-match model selection
+	- `open-meteo-era5`: Open-Meteo archive forced to ERA5 reanalysis
+	- `reading-sc-rss`: Reading Sailing Club station RSS (single station near Sonning Eye, UK)
+- Auto mode behavior:
+	- North America and Europe activities up to 10 days old use `open-meteo` (best-match)
+	- Older activities or other regions use `open-meteo-era5`
+- Override per request:
+	- `GET /api/weather/wind?...&provider=open-meteo-era5`
+	- `POST /api/weather/wind-track` with JSON body `{ "provider": "open-meteo-era5", "points": [...] }`
+
+### Reading SC station provider notes
+
+- Provider id: `reading-sc-rss`
+- Data source: `https://www.weather.readingsc.org.uk/rss.xml`
+- Coverage: single station only (Reading Sailing Club, Sonning Eye)
+- Requests farther than `READING_SC_MAX_DISTANCE_KM` from the station return no sample.
+- Requested activity time must be within `READING_SC_MAX_SAMPLE_AGE_MINUTES` of the latest RSS observation.
 
 ## Strava setup
 

@@ -87,6 +87,23 @@ h1 {
   flex-wrap: wrap;
 }
 
+.provider-select-label {
+  font-family: 'Courier New', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.72rem;
+  color: rgba(31, 29, 26, 0.58);
+}
+
+.provider-select {
+  border: 1px solid rgba(31, 75, 95, 0.32);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #1f4b5f;
+  padding: 10px 14px;
+  min-height: 42px;
+}
+
 .actions button {
   border: none;
   border-radius: 999px;
@@ -349,6 +366,57 @@ h1 {
   margin: 8px 0 10px;
 }
 
+.wind-live-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.wind-live-speed-wrap {
+  min-width: 120px;
+  padding: 8px 10px;
+  border: 1px solid rgba(31, 29, 26, 0.12);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.wind-live-speed-label {
+  margin: 0;
+  font-family: 'Courier New', monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 0.68rem;
+  color: rgba(31, 29, 26, 0.6);
+}
+
+.wind-live-speed {
+  margin: 4px 0 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #1f4b5f;
+}
+
+.wind-live-speed.is-updating {
+  animation: wind-speed-pulse 360ms ease-out;
+}
+
+@keyframes wind-speed-pulse {
+  0% {
+    color: #8a4b2c;
+    transform: translateY(-1px);
+  }
+
+  70% {
+    color: #1f4b5f;
+    transform: translateY(0);
+  }
+
+  100% {
+    color: #1f4b5f;
+    transform: translateY(0);
+  }
+}
+
 .wind-needle-wrap {
   position: absolute;
   inset: 50% auto auto 50%;
@@ -451,6 +519,11 @@ h1 {
 
   .route-controls {
     grid-template-columns: 1fr;
+  }
+
+  .wind-live-row {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   .activity-option-header {
