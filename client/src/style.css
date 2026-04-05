@@ -258,6 +258,170 @@ h1 {
   font-size: 1.05rem;
 }
 
+.weather-block {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(31, 29, 26, 0.12);
+}
+
+.route-block {
+  margin-top: 6px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(31, 29, 26, 0.12);
+}
+
+.route-visual {
+  width: 100%;
+  border: 1px solid rgba(31, 29, 26, 0.16);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(222, 238, 244, 0.65), rgba(240, 246, 249, 0.62));
+  overflow: hidden;
+}
+
+.route-controls {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.route-controls button {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: #1f4b5f;
+  color: #f7f1e8;
+  cursor: pointer;
+}
+
+.route-controls input[type='range'] {
+  width: 100%;
+}
+
+#route-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.route-line {
+  fill: none;
+  stroke: rgba(31, 75, 95, 0.68);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.route-wind-shaft {
+  stroke: rgba(138, 75, 44, 0.92);
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.route-wind-head {
+  fill: rgba(138, 75, 44, 0.92);
+}
+
+.route-playhead-dot {
+  fill: #1f4b5f;
+  stroke: rgba(255, 255, 255, 0.92);
+  stroke-width: 2;
+}
+
+.route-playhead-shaft {
+  stroke: rgba(31, 75, 95, 0.94);
+  stroke-width: 2.1;
+  stroke-linecap: round;
+}
+
+.route-playhead-head {
+  fill: rgba(31, 75, 95, 0.94);
+}
+
+.wind-visual {
+  width: 110px;
+  height: 110px;
+  border-radius: 999px;
+  border: 1px solid rgba(31, 29, 26, 0.22);
+  background: rgba(255, 255, 255, 0.7);
+  position: relative;
+  margin: 8px 0 10px;
+}
+
+.wind-needle-wrap {
+  position: absolute;
+  inset: 50% auto auto 50%;
+  width: 0;
+  height: 0;
+}
+
+.wind-needle {
+  display: block;
+  width: 2px;
+  height: 38px;
+  background: #1f4b5f;
+  transform-origin: 50% 100%;
+  transform: translate(-50%, -100%) rotate(0deg);
+  position: relative;
+}
+
+.wind-needle::after {
+  content: '';
+  position: absolute;
+  top: -8px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-bottom: 10px solid #1f4b5f;
+}
+
+.wind-n,
+.wind-e,
+.wind-s,
+.wind-w {
+  position: absolute;
+  font-family: 'Courier New', monospace;
+  font-size: 0.7rem;
+  color: rgba(31, 29, 26, 0.62);
+}
+
+.wind-n {
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.wind-e {
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.wind-s {
+  bottom: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.wind-w {
+  left: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.wind-summary {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.wind-meta {
+  margin: 4px 0 0;
+  color: rgba(31, 29, 26, 0.62);
+  font-size: 0.85rem;
+}
+
 @media (max-width: 640px) {
   #app {
     padding: 20px 14px;
@@ -282,6 +446,10 @@ h1 {
   }
 
   .activities-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .route-controls {
     grid-template-columns: 1fr;
   }
 
