@@ -21,10 +21,12 @@ const port = Number(process.env.PORT || 3000)
 const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173'
 const sessionCookieName = 'windviz_session'
 const sessionTtlMs = 30 * 24 * 60 * 60 * 1000
+const sessionEncryptionAlgorithm = 'aes-256-gcm'
 const stravaAuthorizeUrl = 'https://www.strava.com/oauth/authorize'
 const stravaTokenUrl = 'https://www.strava.com/oauth/token'
 const stravaApiBaseUrl = 'https://www.strava.com/api/v3'
 const sessionStorePath = fileURLToPath(new URL('../../.data/sessions.json', import.meta.url))
+const sessionEncryptionKey = getSessionEncryptionKey()
 const sessions = loadSessions()
 
 app.use(cors({ origin: frontendUrl, credentials: true }))
@@ -53,13 +55,18 @@ app.get('/api/strava/status', async (request, response) => {
   response.json({
     configured: config.configured,
     connected: isConnected,
+    secureStorageConfigured: Boolean(sessionEncryptionKey),
     athlete: session?.strava?.athlete || null,
     expiresAt: session?.strava?.expiresAt || null,
     scopes: session?.strava?.scope ? session.strava.scope.split(',') : [],
     message: config.configured
-      ? isConnected
-        ? 'Strava account connected.'
-        : 'Connect your Strava account to load activities.'
+      ? sessionEncryptionKey
+        ? isConnected
+          ? 'Strava account connected.'
+          : 'Connect your Strava account to load activities.'
+        : isConnected
+          ? 'Strava account connected. Add SESSION_ENCRYPTION_KEY to keep tokens encrypted across restarts.'
+          : 'Connect your Strava account to load activities. Add SESSION_ENCRYPTION_KEY to persist encrypted tokens across restarts.'
       : 'Add STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET to .env.',
   })
 })
@@ -232,6 +239,22 @@ function getStravaConfig() {
     redirectUri,
     configured: Boolean(clientId && clientSecret),
   }
+}
+
+function getSessionEncryptionKey() {
+  const rawKey = process.env.SESSION_ENCRYPTION_KEY || ''
+
+  if (!rawKey) {
+    console.warn('SESSION_ENCRYPTION_KEY is not set. Persisted Strava tokens will not survive server restarts.')
+    return null
+  }
+
+  if (!/^[0-9a-fA-F]{64}$/.test(rawKey)) {
+    console.warn('SESSION_ENCRYPTION_KEY must be 64 hex characters. Persisted Strava tokens will not survive server restarts.')
+    return null
+  }
+
+  return Buffer.from(rawKey, 'hex')
 }
 
 function parseCookies(cookieHeader = '') {
@@ -424,7 +447,7 @@ function loadSessions() {
         continue
       }
 
-      loadedSessions.set(sessionId, session)
+      loadedSessions.set(sessionId, hydrateSession(sessionId, session))
     }
 
     return loadedSessions
@@ -438,7 +461,9 @@ function persistSessions() {
   pruneExpiredSessions()
   mkdirSync(fileURLToPath(new URL('../../.data', import.meta.url)), { recursive: true })
 
-  const serializedSessions = Object.fromEntries(sessions)
+  const serializedSessions = Object.fromEntries(
+    Array.from(sessions.entries(), ([sessionId, session]) => [sessionId, serializeSession(sessionId, session)]),
+  )
   const tempPath = `${sessionStorePath}.tmp`
 
   writeFileSync(tempPath, JSON.stringify(serializedSessions, null, 2))
@@ -459,4 +484,91 @@ function pruneExpiredSessions() {
   }
 
   return removedAny
+}
+
+function hydrateSession(sessionId, session) {
+  const hydratedSession = { ...session }
+
+  if (hydratedSession.encryptedStrava) {
+    const strava = decryptPayload(hydratedSession.encryptedStrava)
+
+    if (strava) {
+      hydratedSession.strava = strava
+    }
+
+    delete hydratedSession.encryptedStrava
+  } else if (hydratedSession.strava) {
+    console.warn(`Dropping legacy plaintext Strava session data for ${sessionId}.`)
+    delete hydratedSession.strava
+  }
+
+  return hydratedSession
+}
+
+function serializeSession(sessionId, session) {
+  const serializedSession = { ...session }
+
+  if (!serializedSession.strava) {
+    delete serializedSession.encryptedStrava
+    return serializedSession
+  }
+
+  if (!sessionEncryptionKey) {
+    console.warn(`Skipping persisted Strava tokens for ${sessionId} because SESSION_ENCRYPTION_KEY is not configured.`)
+    delete serializedSession.strava
+    delete serializedSession.encryptedStrava
+    return serializedSession
+  }
+
+  serializedSession.encryptedStrava = encryptPayload(serializedSession.strava)
+  delete serializedSession.strava
+
+  return serializedSession
+}
+
+function encryptPayload(payload) {
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv(sessionEncryptionAlgorithm, sessionEncryptionKey, iv)
+  const ciphertext = Buffer.concat([
+    cipher.update(JSON.stringify(payload), 'utf8'),
+    cipher.final(),
+  ])
+  const authTag = cipher.getAuthTag()
+
+  return {
+    algorithm: sessionEncryptionAlgorithm,
+    iv: iv.toString('hex'),
+    authTag: authTag.toString('hex'),
+    ciphertext: ciphertext.toString('hex'),
+  }
+}
+
+function decryptPayload(encryptedPayload) {
+  if (!sessionEncryptionKey) {
+    return null
+  }
+
+  if (encryptedPayload.algorithm !== sessionEncryptionAlgorithm) {
+    console.warn(`Unsupported encrypted session algorithm: ${encryptedPayload.algorithm}`)
+    return null
+  }
+
+  try {
+    const decipher = crypto.createDecipheriv(
+      sessionEncryptionAlgorithm,
+      sessionEncryptionKey,
+      Buffer.from(encryptedPayload.iv, 'hex'),
+    )
+    decipher.setAuthTag(Buffer.from(encryptedPayload.authTag, 'hex'))
+
+    const plaintext = Buffer.concat([
+      decipher.update(Buffer.from(encryptedPayload.ciphertext, 'hex')),
+      decipher.final(),
+    ])
+
+    return JSON.parse(plaintext.toString('utf8'))
+  } catch (error) {
+    console.warn('Failed to decrypt persisted Strava session payload:', error)
+    return null
+  }
 }

@@ -31,10 +31,11 @@ This version includes a Strava integration flow so the app can connect to a Stra
 1. Copy `.env.example` to `.env` in the workspace root.
 2. Create a Strava API application in the Strava developer settings.
 3. Fill in `STRAVA_CLIENT_ID` and `STRAVA_CLIENT_SECRET` in `.env`.
-4. Set the Strava authorization callback to `http://localhost:5173/api/strava/callback`.
-5. Run `npm run dev` and open the frontend.
+4. Generate a 32-byte encryption key, for example with `openssl rand -hex 32`, and set it as `SESSION_ENCRYPTION_KEY` in `.env`.
+5. Set the Strava authorization callback to `http://localhost:5173/api/strava/callback`.
+6. Run `npm run dev` and open the frontend.
 
-The backend keeps the Strava token in a local persisted session store at `.data/sessions.json` tied to a cookie, so Strava sessions survive server restarts during development. That is still not durable or secure enough for production and should be replaced with a proper server-side session store or encrypted credential storage.
+The backend keeps the Strava token in a local persisted session store at `.data/sessions.json` tied to a cookie, and the stored Strava payload is encrypted with `SESSION_ENCRYPTION_KEY`, so Strava sessions survive server restarts during development without writing plaintext tokens to disk. That is still not durable or secure enough for production and should be replaced with a proper server-side session store or encrypted credential storage.
 
 ## Development
 
