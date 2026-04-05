@@ -192,34 +192,65 @@ h1 {
   color: rgba(31, 29, 26, 0.72);
 }
 
-.activities-list {
+.activities-layout {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: minmax(260px, 1.05fr) minmax(0, 1fr);
   gap: 16px;
 }
 
-.activity-card {
+.activities-list {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+
+.activity-option {
+  width: 100%;
+  text-align: left;
   padding: 18px;
   border-radius: 20px;
   background: rgba(255, 255, 255, 0.7);
   border: 1px solid rgba(31, 29, 26, 0.08);
+  cursor: pointer;
+  transition: transform 120ms ease, box-shadow 180ms ease, border-color 180ms ease;
 }
 
-.activity-card h3 {
+.activity-option:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 24px rgba(31, 29, 26, 0.08);
+}
+
+.activity-option:focus-visible {
+  outline: 2px solid rgba(31, 75, 95, 0.45);
+  outline-offset: 2px;
+}
+
+.activity-option.is-selected {
+  border-color: rgba(31, 75, 95, 0.45);
+  background: rgba(226, 240, 246, 0.75);
+}
+
+.activity-option h3 {
   margin: 10px 0 14px;
   font-size: 1.25rem;
 }
 
-.activity-header {
+.activity-option-header {
   display: flex;
   justify-content: space-between;
   gap: 12px;
   align-items: baseline;
 }
 
+.activity-option-meta {
+  margin: 0;
+  color: rgba(31, 29, 26, 0.7);
+}
+
 .activity-type,
 .activity-date,
-.activity-stats dt {
+.activity-stats dt,
+.activity-detail-stats dt {
   font-family: 'Courier New', monospace;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -234,23 +265,35 @@ h1 {
   color: rgba(31, 29, 26, 0.56);
 }
 
-.activity-stats {
+.activity-detail {
+  padding: 20px;
+  border-radius: 20px;
+  border: 1px solid rgba(31, 29, 26, 0.08);
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.activity-detail h3 {
+  margin: 8px 0 6px;
+  font-size: 1.4rem;
+}
+
+.activity-detail-stats {
   margin: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px 10px;
 }
 
-.activity-stats div {
+.activity-detail-stats div {
   margin: 0;
 }
 
-.activity-stats dt {
+.activity-detail-stats dt {
   margin-bottom: 4px;
   color: rgba(31, 29, 26, 0.55);
 }
 
-.activity-stats dd {
+.activity-detail-stats dd {
   margin: 0;
   font-size: 1.05rem;
 }
@@ -284,5 +327,18 @@ h1 {
   .activity-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .activities-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .activity-option-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .activity-detail-stats {
+    grid-template-columns: 1fr;
   }
 }
