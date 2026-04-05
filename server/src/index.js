@@ -267,6 +267,100 @@ app.get('/api/strava/activities', async (request, response) => {
   }
 })
 
+app.get('/api/weather/wind', async (request, response) => {
+  const latitude = Number(request.query.lat)
+  const longitude = Number(request.query.lon)
+  const dateTime = request.query.dateTime
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !dateTime) {
+    response.status(400).json({
+      error: 'lat, lon, and dateTime are required query params.',
+    })
+    return
+  }
+
+  try {
+    const weather = await fetchWindWeather(latitude, longitude, String(dateTime))
+
+    if (!weather) {
+      response.status(404).json({
+        error: 'No wind data available for this location and time.',
+      })
+      return
+    }
+
+    response.json(weather)
+  } catch (weatherError) {
+    response.status(502).json({
+      error: 'Failed to load wind data.',
+      detail: weatherError instanceof Error ? weatherError.message : String(weatherError),
+    })
+  }
+})
+
+app.post('/api/weather/wind-track', async (request, response) => {
+  const points = Array.isArray(request.body?.points) ? request.body.points : null
+
+  if (!points || points.length === 0) {
+    response.status(400).json({
+      error: 'Request body must include a non-empty points array.',
+    })
+    return
+  }
+
+  const pointLimit = 40
+  const safePoints = points.slice(0, pointLimit)
+  const cache = new Map()
+
+  try {
+    const samples = await Promise.all(
+      safePoints.map(async (point, idx) => {
+        const latitude = Number(point.lat)
+        const longitude = Number(point.lon)
+        const dateTime = String(point.dateTime || '')
+
+        if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || !dateTime) {
+          return {
+            index: Number.isFinite(Number(point.index)) ? Number(point.index) : idx,
+            error: 'Invalid point payload.',
+          }
+        }
+
+        const cacheKey = buildWeatherCacheKey(latitude, longitude, dateTime)
+        let weather = cache.get(cacheKey)
+
+        if (!weather) {
+          weather = await fetchWindWeather(latitude, longitude, dateTime)
+          cache.set(cacheKey, weather)
+        }
+
+        if (!weather) {
+          return {
+            index: Number.isFinite(Number(point.index)) ? Number(point.index) : idx,
+            error: 'No weather sample available.',
+          }
+        }
+
+        return {
+          index: Number.isFinite(Number(point.index)) ? Number(point.index) : idx,
+          weather,
+        }
+      }),
+    )
+
+    response.json({
+      source: 'open-meteo',
+      samples,
+      limitedTo: pointLimit,
+    })
+  } catch (weatherError) {
+    response.status(502).json({
+      error: 'Failed to load route wind data.',
+      detail: weatherError instanceof Error ? weatherError.message : String(weatherError),
+    })
+  }
+})
+
 app.post('/api/strava/disconnect', (request, response) => {
   const session = getSession(request)
 
@@ -484,6 +578,10 @@ function clampNumber(value, minimum, maximum, fallback) {
 }
 
 function mapActivity(activity) {
+  const [startLatitude, startLongitude] = Array.isArray(activity.start_latlng)
+    ? activity.start_latlng
+    : [null, null]
+
   return {
     id: activity.id,
     name: activity.name,
@@ -494,6 +592,10 @@ function mapActivity(activity) {
     elapsedTimeSeconds: activity.elapsed_time,
     totalElevationGain: activity.total_elevation_gain,
     startDateLocal: activity.start_date_local,
+    startDateUtc: activity.start_date,
+    startLatitude,
+    startLongitude,
+    summaryPolyline: activity.map?.summary_polyline || null,
     timezone: activity.timezone,
     averageSpeed: activity.average_speed,
     maxSpeed: activity.max_speed,
@@ -509,6 +611,81 @@ async function safeReadText(response) {
   } catch {
     return 'Unable to read response body.'
   }
+}
+
+async function fetchWindWeather(latitude, longitude, dateTimeString) {
+  const activityDate = new Date(dateTimeString)
+
+  if (Number.isNaN(activityDate.getTime())) {
+    throw new Error('Invalid dateTime value.')
+  }
+
+  const dateIso = activityDate.toISOString().slice(0, 10)
+  const params = new URLSearchParams({
+    latitude: String(latitude),
+    longitude: String(longitude),
+    start_date: dateIso,
+    end_date: dateIso,
+    hourly: 'wind_speed_10m,wind_direction_10m',
+    timezone: 'UTC',
+  })
+  const weatherResponse = await fetch(`https://archive-api.open-meteo.com/v1/archive?${params.toString()}`)
+
+  if (!weatherResponse.ok) {
+    throw new Error(await safeReadText(weatherResponse))
+  }
+
+  const payload = await weatherResponse.json()
+  const hourly = payload?.hourly
+
+  if (!hourly?.time || !hourly?.wind_speed_10m || !hourly?.wind_direction_10m) {
+    return null
+  }
+
+  let bestIndex = -1
+  let smallestDiff = Number.POSITIVE_INFINITY
+
+  for (let i = 0; i < hourly.time.length; i += 1) {
+    const sampleTime = new Date(hourly.time[i]).getTime()
+
+    if (Number.isNaN(sampleTime)) {
+      continue
+    }
+
+    const diff = Math.abs(sampleTime - activityDate.getTime())
+
+    if (diff < smallestDiff) {
+      smallestDiff = diff
+      bestIndex = i
+    }
+  }
+
+  if (bestIndex === -1) {
+    return null
+  }
+
+  return {
+    source: 'open-meteo',
+    sampleTimeUtc: hourly.time[bestIndex],
+    windSpeedKph: Number(hourly.wind_speed_10m[bestIndex]),
+    windDirectionDeg: Number(hourly.wind_direction_10m[bestIndex]),
+  }
+}
+
+function buildWeatherCacheKey(latitude, longitude, dateTime) {
+  const date = new Date(dateTime)
+  const hourlyStamp = Number.isNaN(date.getTime())
+    ? dateTime
+    : new Date(
+        Date.UTC(
+          date.getUTCFullYear(),
+          date.getUTCMonth(),
+          date.getUTCDate(),
+          date.getUTCHours(),
+        ),
+      ).toISOString()
+
+  return `${latitude.toFixed(2)}:${longitude.toFixed(2)}:${hourlyStamp}`
 }
 
 function createSessionRecord() {
