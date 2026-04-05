@@ -229,8 +229,8 @@ app.listen(port, () => {
 })
 
 function getStravaConfig() {
-  const clientId = process.env.STRAVA_CLIENT_ID || ''
-  const clientSecret = process.env.STRAVA_CLIENT_SECRET || ''
+  const clientId = sanitizeConfigValue(process.env.STRAVA_CLIENT_ID)
+  const clientSecret = sanitizeConfigValue(process.env.STRAVA_CLIENT_SECRET)
   const redirectUri = process.env.STRAVA_REDIRECT_URI || `${frontendUrl}/api/strava/callback`
 
   return {
@@ -239,6 +239,20 @@ function getStravaConfig() {
     redirectUri,
     configured: Boolean(clientId && clientSecret),
   }
+}
+
+function sanitizeConfigValue(value) {
+  const trimmed = (value || '').trim()
+
+  if (!trimmed) {
+    return ''
+  }
+
+  if (trimmed.startsWith('your-') || trimmed.startsWith('replace-with-')) {
+    return ''
+  }
+
+  return trimmed
 }
 
 function getSessionEncryptionKey() {
