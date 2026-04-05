@@ -37,7 +37,15 @@ app.innerHTML = `
         </div>
       </div>
       <div id="activities-empty" class="empty-state">Connect Strava to load activities.</div>
-      <div id="activities-list" class="activities-list"></div>
+      <div id="activities-layout" class="activities-layout" hidden>
+        <div id="activities-list" class="activities-list" role="listbox" aria-label="Activities"></div>
+        <article id="activity-detail" class="activity-detail" aria-live="polite">
+          <p id="activity-detail-type" class="activity-type">-</p>
+          <h3 id="activity-detail-title">Select an activity</h3>
+          <p id="activity-detail-date" class="activity-date">-</p>
+          <dl id="activity-detail-stats" class="activity-detail-stats"></dl>
+        </article>
+      </div>
     </section>
   </main>
 `
@@ -50,8 +58,16 @@ const messageTitle = document.querySelector('#message-title')
 const messageBody = document.querySelector('#message-body')
 const payload = document.querySelector('#payload')
 const activitiesEmpty = document.querySelector('#activities-empty')
+const activitiesLayout = document.querySelector('#activities-layout')
 const activitiesList = document.querySelector('#activities-list')
+const activityDetailType = document.querySelector('#activity-detail-type')
+const activityDetailTitle = document.querySelector('#activity-detail-title')
+const activityDetailDate = document.querySelector('#activity-detail-date')
+const activityDetailStats = document.querySelector('#activity-detail-stats')
 
+let currentConfigSource = 'none'
+let currentActivities = []
+let selectedActivityId = null
 async function requestJson(url, options) {
   const response = await fetch(url, options)
   const data = await response.json().catch(() => null)
@@ -70,46 +86,98 @@ function setBusyState(isBusy) {
 }
 
 function renderActivities(activities) {
-  activitiesList.innerHTML = ''
+  currentActivities = activities
 
   if (!activities.length) {
     activitiesEmpty.hidden = false
     activitiesEmpty.textContent = 'No activities returned for this athlete yet.'
+    activitiesLayout.hidden = true
+    selectedActivityId = null
     return
   }
 
   activitiesEmpty.hidden = true
+  activitiesLayout.hidden = false
 
-  for (const activity of activities) {
-    const article = document.createElement('article')
-    article.className = 'activity-card'
-    article.innerHTML = `
-      <div class="activity-header">
+  if (!activities.some((activity) => activity.id === selectedActivityId)) {
+    selectedActivityId = activities[0].id
+  }
+
+  renderActivityList()
+  renderActivityDetail()
+}
+
+function renderActivityList() {
+  activitiesList.innerHTML = ''
+
+  for (const activity of currentActivities) {
+    const option = document.createElement('button')
+    option.type = 'button'
+    option.className = 'activity-option'
+    option.dataset.activityId = String(activity.id)
+    option.setAttribute('role', 'option')
+    option.setAttribute('aria-selected', String(activity.id === selectedActivityId))
+
+    if (activity.id === selectedActivityId) {
+      option.classList.add('is-selected')
+    }
+
+    option.innerHTML = `
+      <div class="activity-option-header">
         <p class="activity-type">${activity.sportType || activity.type}</p>
         <p class="activity-date">${formatDate(activity.startDateLocal)}</p>
       </div>
       <h3>${activity.name}</h3>
-      <dl class="activity-stats">
-        <div>
-          <dt>Distance</dt>
-          <dd>${formatDistance(activity.distanceMeters)}</dd>
-        </div>
-        <div>
-          <dt>Moving time</dt>
-          <dd>${formatDuration(activity.movingTimeSeconds)}</dd>
-        </div>
-        <div>
-          <dt>Elevation</dt>
-          <dd>${Math.round(activity.totalElevationGain)} m</dd>
-        </div>
-        <div>
-          <dt>Kudos</dt>
-          <dd>${activity.kudosCount}</dd>
-        </div>
-      </dl>
+      <p class="activity-option-meta">
+        ${formatDistance(activity.distanceMeters)} · ${formatDuration(activity.movingTimeSeconds)}
+      </p>
     `
-    activitiesList.append(article)
+
+    activitiesList.append(option)
   }
+}
+
+function renderActivityDetail() {
+  const activity = currentActivities.find((entry) => entry.id === selectedActivityId)
+
+  if (!activity) {
+    activityDetailType.textContent = '-'
+    activityDetailTitle.textContent = 'Select an activity'
+    activityDetailDate.textContent = '-'
+    activityDetailStats.innerHTML = ''
+    return
+  }
+
+  activityDetailType.textContent = activity.sportType || activity.type
+  activityDetailTitle.textContent = activity.name
+  activityDetailDate.textContent = formatDate(activity.startDateLocal)
+  activityDetailStats.innerHTML = buildDetailStats(activity)
+}
+
+function buildDetailStats(activity) {
+  const stats = [
+    ['Distance', formatDistance(activity.distanceMeters)],
+    ['Moving time', formatDuration(activity.movingTimeSeconds)],
+    ['Elapsed time', formatDuration(activity.elapsedTimeSeconds)],
+    ['Elevation gain', `${Math.round(activity.totalElevationGain)} m`],
+    ['Average speed', formatSpeed(activity.averageSpeed)],
+    ['Max speed', formatSpeed(activity.maxSpeed)],
+    ['Average pace', formatPace(activity.averageSpeed)],
+    ['Kudos', String(activity.kudosCount)],
+    ['Achievements', String(activity.achievementCount)],
+    ['Energy', activity.kilojoules ? `${Math.round(activity.kilojoules)} kJ` : '-'],
+  ]
+
+  return stats
+    .map(
+      ([label, value]) => `
+        <div>
+          <dt>${label}</dt>
+          <dd>${value}</dd>
+        </div>
+      `,
+    )
+    .join('')
 }
 
 async function loadStatus() {
@@ -182,6 +250,26 @@ function formatDistance(distanceMeters) {
   return `${(distanceMeters / 1000).toFixed(1)} km`
 }
 
+function formatSpeed(speedMetersPerSecond) {
+  if (!speedMetersPerSecond || speedMetersPerSecond <= 0) {
+    return '-'
+  }
+
+  return `${(speedMetersPerSecond * 3.6).toFixed(1)} km/h`
+}
+
+function formatPace(speedMetersPerSecond) {
+  if (!speedMetersPerSecond || speedMetersPerSecond <= 0) {
+    return '-'
+  }
+
+  const totalSecondsPerKm = 1000 / speedMetersPerSecond
+  const minutes = Math.floor(totalSecondsPerKm / 60)
+  const seconds = Math.round(totalSecondsPerKm % 60)
+
+  return `${minutes}:${String(seconds).padStart(2, '0')} /km`
+}
+
 function formatDuration(totalSeconds) {
   const hours = Math.floor(totalSeconds / 3600)
   const minutes = Math.floor((totalSeconds % 3600) / 60)
@@ -223,12 +311,31 @@ function handleCallbackState() {
   window.history.replaceState({}, '', url)
 }
 
+function handleActivitySelection(event) {
+  const target = event.target.closest('[data-activity-id]')
+
+  if (!target) {
+    return
+  }
+
+  const activityId = Number(target.dataset.activityId)
+
+  if (!Number.isFinite(activityId) || activityId === selectedActivityId) {
+    return
+  }
+
+  selectedActivityId = activityId
+  renderActivityList()
+  renderActivityDetail()
+}
+
 connectButton.addEventListener('click', () => {
   window.location.href = '/api/strava/connect'
 })
 
 refreshButton.addEventListener('click', loadActivities)
 disconnectButton.addEventListener('click', disconnectStrava)
+activitiesList.addEventListener('click', handleActivitySelection)
 
 handleCallbackState()
 loadStatus().catch((error) => {
